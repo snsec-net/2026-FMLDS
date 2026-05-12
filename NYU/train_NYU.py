@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -8,32 +7,32 @@ from dataset_processor_NYU import DatasetProcessor
 from NYU_model import NYU_DGA
 from tqdm import tqdm
 import time
-import datetime
 import wandb
 from sklearn.metrics import roc_curve, precision_score, recall_score, f1_score
-import random
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
-from utility.path import path_data, path_artifacts
+from utility.path import path_train_data, path_artifacts
 
 if __name__ == '__main__':
+
     best_filename = "NYU_T24"
     num_epochs = 100
     batch_size = 100
     learning_rate = 1e-4
+
     wandb.init(project='2026FMLDS', name=best_filename,
             config={
-            "learning_rate": {learning_rate},
-            "epochs": {num_epochs},
-            "batch_size": {batch_size},
+            "learning_rate": learning_rate,
+            "epochs": num_epochs,
+            "batch_size": batch_size,
             "model_architecture": "NYU",
             "benign": "24",
             "dga": "24",
         }, mode='online')
 
-    train_files = [path_data.joinpath('T24_benign_train.parquet'), path_data.joinpath('T24_dga_sampled_train.parquet')]
-    val_files = [path_data.joinpath('T24_benign_val.parquet'), path_data.joinpath('T24_dga_sampled_val.parquet')]
+    train_files = [path_train_data.joinpath('T24_benign_train.parquet'), path_train_data.joinpath('T24_dga_sampled_train.parquet')]
+    val_files = [path_train_data.joinpath('T24_benign_val.parquet'), path_train_data.joinpath('T24_dga_sampled_val.parquet')]
 
     target_cols = ['domain', 'label']
 
@@ -42,27 +41,15 @@ if __name__ == '__main__':
 
     train_dataset = DatasetProcessor(train_df)
     val_dataset   = DatasetProcessor(val_df)
+    
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    def set_seed(seed: int=42) :
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
     # 모델 세팅
-    # set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = NYU_DGA().to(device)
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate) 
-
-    train_losses = []
-    val_losses = []
 
     best_val_loss = float('inf')
     best_epoch = 0
@@ -81,7 +68,6 @@ if __name__ == '__main__':
             optimizer.step()
             train_loss += loss.item() * X_batch.size(0) # 배치별 loss 총합의 합
         train_loss /= len(train_loader.dataset) # 모든 데이터에 대한 평균 loss
-        train_losses.append(train_loss)
         
         # 검증
         model.eval()
@@ -98,7 +84,6 @@ if __name__ == '__main__':
                 val_output.append(outputs.squeeze().cpu())
                 val_labels.append(y_val.cpu())
         val_loss /= len(val_loader.dataset)
-        val_losses.append(val_loss)
 
         # 모델 저장
         if val_loss < best_val_loss :
@@ -106,7 +91,6 @@ if __name__ == '__main__':
             best_epoch = epoch + 1
             save_path = path_artifacts.joinpath(f'{best_filename}.pt')
             torch.save(model.state_dict(), save_path)
-
 
         val_output = torch.cat(val_output)
         val_labels = torch.cat(val_labels)
@@ -138,9 +122,7 @@ if __name__ == '__main__':
         print(f"Epoch {epoch+1} [Time: {epoch_time:.2f}s]: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val_ACC: {accuracy:.4f}, Val_precision: {precision:.4f}, Val_recall: {recall:.4f}, Val_F1: {f1:.4f}, Optimal Threshold: {theta:.4f}")
 
     wandb.summary["best_epoch"] = best_epoch
-
     artifact = wandb.Artifact(name=best_filename, type="model")
     artifact.add_file(save_path)
     wandb.log_artifact(artifact)
-
     wandb.finish()

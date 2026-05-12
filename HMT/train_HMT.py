@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -8,33 +7,22 @@ from dataset_processor_HMT import DatasetProcessor, BigramDictionaryBuilder
 from HMT_model import HybridModifiedTransformer
 from tqdm import tqdm
 import time
-import datetime
 import wandb
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_curve
-import random
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
-from utility.path import path_data, path_artifacts
-
+from utility.path import path_train_data, path_artifacts
 
 if __name__ == '__main__':
-    def set_seed(seed: int=42) :
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
 
+    best_filename = "HMT_T24"
     num_epochs = 100
     num_classes = 1
     label = 'label'
     n_t_layers = 6
     learning_rate = 1e-4
     batch_size = 128
-    best_filename = "HMT_T24"
 
     wandb.init(project='2026FMLDS', name=best_filename,
             config={
@@ -47,16 +35,10 @@ if __name__ == '__main__':
             "dga": "24",
         }, mode='online')
 
-    target_cols = ['domain', 'label']
+    train_files = [path_train_data.joinpath('T24_benign_train.parquet'), path_train_data.joinpath('T24_dga_sampled_train.parquet')]
+    val_files = [path_train_data.joinpath('T24_benign_val.parquet'), path_train_data.joinpath('T24_dga_sampled_val.parquet')]
 
-    train_files = [
-        path_data.joinpath('T24_benign_train.parquet'), 
-        path_data.joinpath('T24_dga_sampled_train.parquet')
-    ]
-    val_files = [
-        path_data.joinpath('T24_benign_val.parquet'), 
-        path_data.joinpath('T24_dga_sampled_val.parquet')
-    ]
+    target_cols = ['domain', 'label']
 
     train_df = pd.concat([pd.read_parquet(f, columns=target_cols) for f in train_files]).reset_index(drop=True)
     val_df = pd.concat([pd.read_parquet(f, columns=target_cols) for f in val_files]).reset_index(drop=True)
@@ -80,9 +62,6 @@ if __name__ == '__main__':
     criterion_multi = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate) 
 
-    train_losses = []
-    val_losses = []
-
     best_val_loss = float('inf')
     best_epoch = 0
 
@@ -91,17 +70,9 @@ if __name__ == '__main__':
 
         model.train()
         train_loss = 0.0
-
-        train_loop = tqdm(
-            train_loader, 
-            total=len(train_loader), 
-            desc=f"Epoch {epoch+1}/{num_epochs} [TRAIN]", leave=False
-        )
-
-        for idx, (char_X, bigram_X, y) in enumerate(train_loop):
+        for idx, (char_X, bigram_X, y) in tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]", leave=False):
             char_X, bigram_X = char_X.to(device), bigram_X.to(device)
             y = y.to(device)
-
             optimizer.zero_grad()
             outputs = model(char_X, bigram_X)
             if num_classes == 1 :
@@ -111,23 +82,15 @@ if __name__ == '__main__':
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * char_X.size(0)
-
         train_loss /= len(train_loader.dataset)
-        train_losses.append(train_loss)
 
         model.eval()
         val_loss = 0.0
         val_output = []
         val_labels = []
-        
-        val_loop = tqdm(
-            val_loader,
-            total=len(val_loader),
-            desc=f"Epoch {epoch+1}/{num_epochs} [VAL]", leave=False
-        )
 
         with torch.no_grad():
-            for (char_X, bigram_X, y) in val_loop:
+            for (char_X, bigram_X, y) in tqdm(val_loader, desc=f"Epoch {epoch+1} [Val]", leave=False):
                 char_X, bigram_X = char_X.to(device), bigram_X.to(device)
                 y = y.to(device)
                 outputs = model(char_X, bigram_X)
@@ -140,9 +103,7 @@ if __name__ == '__main__':
                 val_loss += loss.item() * char_X.size(0)
                 val_output.append(probabilities)
                 val_labels.append(y.cpu())
-
         val_loss /= len(val_loader.dataset)
-        val_losses.append(val_loss)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -208,9 +169,7 @@ if __name__ == '__main__':
         print(f"Epoch {epoch+1} [Time: {epoch_time:.2f}s]: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, {print_metrics}")
 
     wandb.summary["best_epoch"] = best_epoch
-
     artifact = wandb.Artifact(name=best_filename, type="model")
     artifact.add_file(save_path)
     wandb.log_artifact(artifact)
-
     wandb.finish()
