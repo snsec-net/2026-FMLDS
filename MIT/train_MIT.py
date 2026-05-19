@@ -115,8 +115,8 @@ if __name__ == "__main__":
                 inputs, labels = inputs.to(device), labels.to(device).float()
                 outputs = model(inputs)
                 val_loss += criterion(outputs, labels.float().view_as(outputs)).item()
-                val_outputs.append(outputs.squeeze().cpu())
-                val_labels.append(labels.squeeze().cpu())
+                val_outputs.append(outputs.detach().cpu().view(-1))
+                val_labels.append(labels.detach().cpu().view(-1))
         avg_val_loss = val_loss / len(val_loader)
                 
         if avg_val_loss < best_val_loss:

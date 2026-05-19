@@ -110,8 +110,8 @@ if __name__ == '__main__':
                 outputs = model(X_val)
                 loss = criterion(outputs.squeeze(), y_val)
                 val_loss += loss.item() * X_val.size(0)
-                val_output.append(outputs.squeeze().cpu())
-                val_labels.append(y_val.cpu())
+                val_output.append(outputs.detach().cpu().view(-1))
+                val_labels.append(y_val.detach().cpu().view(-1))
         val_loss /= len(val_loader.dataset)
 
         # 모델 저장
