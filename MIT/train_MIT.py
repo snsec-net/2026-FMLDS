@@ -13,25 +13,30 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from utility.path import path_train_data, path_artifacts
+import argparse
+from sklearn.model_selection import train_test_split
 
-def process_domain(domain):
-    # 소문자 변환 및 뒤에서 75자만 자르기
-    domain = str(domain).lower()[-75:]
-    
-    # ASCII 정수로 변환
-    indices = [ord(c) for c in domain]
-    
-    # 0으로 패딩 (75자리 맞추기)
-    pad_len = 75 - len(indices)
-    return [0] * pad_len + indices
+def cutting_df(df, count, rank) :
+    df = df[~(
+        (df['day_count'] <= count) &
+        (df['avg_rank'] >= rank)
+    )].reset_index(drop=True)
+    return df
 
 
 if __name__ == "__main__":
 
-    best_filename='MIT_T24'
-    learning_rate = 1e-4
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--count', type=int, default=1, help='Unique count threshold')
+    parser.add_argument('--rank', type=int, default=1000000, help='Rank threshold')
+    args = parser.parse_args()
+
+    count = args.count
+    rank = args.rank
+
+    best_filename=f'MIT_T24_{count}_{rank}'
     batch_size = 100
-    epochs = 100 
+    epochs = 50
     learning_rate = 1e-4
 
     # wandb
@@ -41,21 +46,30 @@ if __name__ == "__main__":
             "epochs": epochs,
             "batch_size": batch_size,
             "model_architecture": "MIT",
-            "benign": "24",
-            "dga": "24",
+            "benign": "24 1day",
+            "dga": "24 1day",
+            "count": count,
+            "rank": rank,
         }, mode='online')
 
 
-    train_files = [path_train_data.joinpath('T24_benign_train.parquet'), path_train_data.joinpath('T24_dga_sampled_train.parquet')]
-    val_files = [path_train_data.joinpath('T24_benign_val.parquet'), path_train_data.joinpath('T24_dga_sampled_val.parquet')]
-
     target_cols = ['domain', 'label']
 
-    train_df = pd.concat([pd.read_parquet(f, columns=target_cols) for f in train_files]).reset_index(drop=True)
-    val_df = pd.concat([pd.read_parquet(f, columns=target_cols) for f in val_files]).reset_index(drop=True)
+    dga_train_df = pd.read_parquet(path_train_data.joinpath('T24_dga_1day_train.parquet'), columns=target_cols)
+    dga_val_df = pd.read_parquet(path_train_data.joinpath('T24_dga_1day_val.parquet'), columns=target_cols)
 
-    train_df["domain"] = train_df["domain"].apply(process_domain)
-    val_df["domain"] = val_df["domain"].apply(process_domain)
+    benign_df = pd.read_parquet(path_train_data.joinpath('T24_benign_1day.parquet'))
+
+    benign_df = cutting_df(benign_df, count, rank)
+    benign_df = benign_df[target_cols]
+
+    benign_train_df, benign_val_df = train_test_split(benign_df, test_size=0.1, random_state=42)
+
+    print(f"Benign train: {len(benign_train_df)}, Val: {len(benign_val_df)}")
+    print(f"DGA train: {len(dga_train_df)}, Val: {len(dga_val_df)}")
+
+    train_df = pd.concat([benign_train_df, dga_train_df]).reset_index(drop=True)
+    val_df = pd.concat([benign_val_df, dga_val_df]).reset_index(drop=True)
 
     # DataLoader 생성
     train_dataset = DGA_Dataset(train_df)

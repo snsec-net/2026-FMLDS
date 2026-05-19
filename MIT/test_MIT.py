@@ -14,34 +14,49 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from utility.path import path_train_data, path_test_data, path_artifacts, path_images, path_results
+import argparse
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 
-def process_domain(domain):
-        # 소문자 변환 및 뒤에서 75자만 자르기
-        domain = str(domain).lower()[-75:]
-        
-        # ASCII 정수로 변환
-        indices = [ord(c) for c in domain]
-        
-        # 0으로 패딩 (75자리 맞추기)
-        pad_len = 75 - len(indices)
-        return [0] * pad_len + indices
-
+def cutting_df(df, count, rank) :
+    df = df[~(
+        (df['day_count'] <= count) &
+        (df['avg_rank'] >= rank)
+    )].reset_index(drop=True)
+    return df
 
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--count', type=int, default=1, help='Unique count threshold')
+    parser.add_argument('--rank', type=int, default=1000000, help='Rank threshold')
+    args = parser.parse_args()
+
+    count = args.count
+    rank = args.rank
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MIT().to(device)
 
     batch_size = 100
     target_cols = ['domain', 'label']
 
-    val_files = [path_train_data.joinpath('T24_benign_val.parquet'), path_train_data.joinpath('T24_dga_sampled_val.parquet')]
-    val_df = pd.concat([pd.read_parquet(f, columns=target_cols) for f in val_files]).reset_index(drop=True)
+    dga_val_df = pd.read_parquet(path_train_data.joinpath('T24_dga_1day_val.parquet'), columns=target_cols)
 
-    val_df["domain"] = val_df["domain"].apply(process_domain)
+    cols_to_keep = target_cols + ['day_count','avg_rank'] if 'day_count' not in target_cols or 'avg_rank' not in target_cols else target_cols
+    benign_df = pd.read_parquet(path_train_data.joinpath('T24_benign_1day.parquet'), columns=cols_to_keep)
+
+    benign_df = cutting_df(benign_df, count, rank)
+    # benign_df = benign_df[target_cols]
+
+    _, benign_val_df = train_test_split(benign_df, test_size=0.1, random_state=42)
+
+    val_df = pd.concat([benign_val_df, dga_val_df]).reset_index(drop=True)
+
     val_dataset = DGA_Dataset(val_df)
     val_loader  = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    model.load_state_dict(torch.load(path_artifacts.joinpath(f'MIT_T24.pt')))
+    model.load_state_dict(torch.load(path_artifacts.joinpath(f'MIT_T24_{count}_{rank}.pt')))
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
@@ -63,136 +78,83 @@ if __name__ == "__main__":
     print(f'Threshold: {theta:.4f}\n')
 
     # 테스트
-    test_months = ['tranco_20250115','tranco_20250212','tranco_20250314','tranco_20250412','tranco_20250518', 'tranco_20250613',
-    'tranco_20250718','tranco_20250815','tranco_20250915','tranco_20251013','tranco_20251111','tranco_20251214']
-    
-    n_splits = 25
+    dga_test_df = pd.read_parquet(path_test_data.joinpath('T25-26_dga_1day.parquet'),columns=target_cols)
 
-    boxplot_data = []
+    benign_test_df = pd.read_parquet(path_test_data.joinpath('T25-26_benign_1day.parquet'))
+    benign_test_df = cutting_df(benign_test_df, count, rank)
+    benign_test_df = benign_test_df[target_cols]
 
-    for m_test in test_months:
-        b_test_path = path_test_data.joinpath(f'{m_test}.csv')
+    test_df = pd.concat([benign_test_df, dga_test_df]).reset_index(drop=True)
 
-        test_df = pd.read_csv(
-            b_test_path, 
-            names=['rank','domain'],  # 파일의 실제 형태에 맞춤
-            header=None
-        )
+    # test_df['original_domain'] = test_df['domain']
+    # test_df['domain'] = test_df['domain'].apply(process_domain)
+    test_dataset = DGA_Dataset(test_df)
+    test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-        test_df = test_df.sort_values(by='rank', ascending=True).reset_index(drop=True)
+    all_preds = []
+    all_labels = []
+    start_time = time.time()
 
-        # test_df = test_df.drop(columns=['rank'])
-        test_df['label'] = 0
+    model.eval()
+    with torch.no_grad():
+        for X_test, y in tqdm(test_loader, desc="[Test]", leave=False):
+            X_test, y = X_test.to(device), y.to(device)
+            outputs = model(X_test)
+            all_preds.append(outputs.squeeze().cpu())
+            all_labels.append(y.squeeze().cpu())
 
-        test_df['original_domain'] = test_df['domain']
-        test_df['domain'] = test_df['domain'].apply(process_domain)
-        test_dataset = DGA_Dataset(test_df)
-        test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    test_time = time.time() - start_time
+    all_preds = torch.cat(all_preds)
+    all_labels = torch.cat(all_labels)
 
-        all_preds = []
-        start_time = time.time()
+    pred_labels = (all_preds > theta).int().numpy()
+    true_labels = all_labels.int().numpy()
 
-        model.eval()
-        with torch.no_grad():
-            for X_test, y in tqdm(test_loader, desc=f"[{m_test} Test]", leave=False):
-                X_test, y = X_test.to(device), y.to(device)
-                outputs = model(X_test)
-                all_preds.append(outputs.squeeze().cpu())
+    accuracy = (pred_labels == true_labels).sum().item() / len(true_labels)
+    precision = precision_score(true_labels, pred_labels, zero_division=0)
+    recall = recall_score(true_labels, pred_labels, zero_division=0)
+    f1 = f1_score(true_labels, pred_labels, zero_division=0)
 
-        test_time = time.time() - start_time
-        all_preds = torch.cat(all_preds)
+    tn, fp, fn, tp = confusion_matrix(true_labels, pred_labels).ravel()
+    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+    fnr = fn / (fn + tp) if (fn + tp) > 0 else 0
 
-        pred_labels = (all_preds > theta).int().numpy()
+    test_df['prediction'] = pred_labels
+    test_df['confidence'] = all_preds.numpy()
 
-        test_df['prediction'] = pred_labels
-        test_df['confidence'] = all_preds.numpy()
+    # test_df['domain'] = test_df['original_domain']
+    # test_df = test_df.drop(columns=['original_domain'])
+
+    fp_df = test_df[(test_df['label'] == 0) & (test_df['prediction'] == 1)].copy()
+    fp_df['error_type'] = 'FP'
+
+    fn_df = test_df[(test_df['label'] == 1) & (test_df['prediction'] == 0)].copy()
+    fn_df['error_type'] = 'FN'
+
+    errors_df = pd.concat([fp_df, fn_df], ignore_index=True)
+    errors_save_path = path_results.joinpath(f'./Errors_List_{count}_{rank}_MIT.csv')
+    errors_df.to_csv(errors_save_path, index=False)
+    print(errors_df)
+
+    metrics_data = {
+        'Count_Threshold': [count],
+        'Rank_Threshold': [rank],
+        'Accuracy': [accuracy],
+        'Precision': [precision],
+        'Recall (TPR)': [recall],
+        'F1_Score': [f1],
+        'FPR': [fpr],
+        'FNR': [fnr],
+        'TP': [tp],
+        'TN': [tn],
+        'FP': [fp],
+        'FN': [fn]
+    }
+    metrics_df = pd.DataFrame(metrics_data)
+    metrics_save_path = path_results.joinpath(f'./Metrics_Summary_{count}_{rank}_MIT.csv')
+    metrics_df.to_csv(metrics_save_path, index=False)
         
-        # n등분하여 분할
-        chunks = np.array_split(pred_labels, n_splits)
-
-        chunk_indices = np.concatenate([np.full(len(chunk), i + 1) for i, chunk in enumerate(chunks)])
-        test_df['chunk_index'] = chunk_indices
-
-        fp_month_df = test_df[test_df['prediction'] == 1].copy()
-        fp_month_df = fp_month_df.drop(columns=['domain']).rename(columns={'original_domain': 'domain'})
-        month_save_path = path_results.joinpath(f'./FP_List_{m_test}_MIT.csv') # 저장 경로
-        fp_month_df.to_csv(month_save_path, index=False)
-        
-        # 각 청크(Chunk)별로 FP 및 FPR 계산
-        for i, chunk in enumerate(chunks):
-            chunk_size = len(chunk)
-            if chunk_size == 0:
-                continue
-                
-            # 1이면 모두 FP
-            fp = chunk.sum()
-            fpr = fp / chunk_size
-            
-            boxplot_data.append({
-                'Month': m_test,
-                'Chunk_Index': i + 1,
-                'Chunk_Size': chunk_size,
-                'FP_Count': fp,
-                'FPR': fpr
-            })
-            
-        # 전체 월에 대한 단순 요약 출력
-        total_fp = pred_labels.sum()
-        total_fpr = total_fp / len(pred_labels)
-        print(f"[Month: {m_test}] Test Time: {test_time:.2f}s | Total Data: {len(pred_labels)} | Total FP: {total_fp} | Overall FPR: {total_fpr:.4f}")
-
-    results_df = pd.DataFrame(boxplot_data)
-
-    print("\n=== Chunk별 FPR 결과 요약 ===")
-    print(results_df.head())
-
-    # 박스플랏
-    sns.set_theme(style="whitegrid")
-
-    plt.figure(figsize=(12, 6))
-
-    sns.boxplot(
-        x='Chunk_Index', y='FPR', 
-        data=results_df, 
-        palette='viridis'
-    )
-
-    sns.stripplot(
-        x='Chunk_Index', y='FPR', 
-        data=results_df, 
-        hue='Month',      # 월별로 다른 색상 부여
-        palette='Set1',
-        size=6, 
-        alpha=0.8, 
-        jitter=True, 
-        dodge=True        # 겹치지 않게 살짝 흩뿌림
-    )
-
-    plt.title('FPR Distribution per Rank Chunk Across All Months', fontsize=15, fontweight='bold')
-    plt.xlabel('Rank Chunk Index', fontsize=12)
-    plt.ylabel('False Positive Rate (FPR)', fontsize=12)
-
-    plt.legend(title='Month', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plt.savefig(path_images.joinpath(f'boxplot_chunk_{n_splits}_MIT.png'), bbox_inches='tight')
-    plt.show()
-
-
-    # 라인플랏 (평균)
-    plt.figure(figsize=(10, 5))
-
-    sns.lineplot(
-        x='Chunk_Index', y='FPR', 
-        data=results_df, 
-        color='royalblue',
-        linewidth=2,
-        marker='o'
-    )
-
-    plt.title('Average FPR Trend with 95% Confidence Interval', fontsize=14)
-    plt.xlabel('Rank Chunk Index', fontsize=12)
-    plt.ylabel('FPR', fontsize=12)
-    plt.xticks(range(1, n_splits+1))
-    plt.tight_layout()
-    plt.savefig(path_images.joinpath(f'lineplot_avg_chunk_{n_splits}_MIT.png'), bbox_inches='tight')
-    plt.show()
+    print(f"\n[Test Summary] Test Time: {test_time:.2f}s | Total Data: {len(test_df)}")
+    print(f"Acc: {accuracy:.4f} | F1: {f1:.4f} | Prec: {precision:.4f} | Rec: {recall:.4f}")
+    print(f"Total Errors: {len(errors_df)} (FP: {fp}, FN: {fn})")
+    print(f"FPR: {fpr:.4f} | FNR: {fnr:.4f}")
