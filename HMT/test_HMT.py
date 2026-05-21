@@ -18,10 +18,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 
 def cutting_df(df, count, rank) :
-    df = df[
-        (df['day_count'] >= count) & 
-        (df['avg_rank'] <= rank)
-    ].reset_index(drop=True)
+    df = df[~(
+        (df['day_count'] <= count) &
+        (df['avg_rank'] >= rank)
+    )].reset_index(drop=True)
     return df
 
 if __name__ == "__main__":
