@@ -62,18 +62,18 @@ if __name__ == "__main__":
         param.requires_grad = False
 
     # Treshold 찾기
-    val_output = []
+    val_outputs = []
     val_labels = []
 
     with torch.no_grad() :
         for X_val, y_val in tqdm(val_loader, desc=f"[Threshold]", leave=False):
             X_val, y_val = X_val.to(device), y_val.to(device)
             outputs = model(X_val)
-            val_output.append(outputs.squeeze().cpu())
-            val_labels.append(y_val.cpu())
-    val_output = torch.cat(val_output)
+            val_outputs.append(outputs.detach().cpu().view(-1))
+            val_labels.append(y_val.detach().cpu().view(-1))
+    val_outputs = torch.cat(val_outputs)
     val_labels = torch.cat(val_labels)
-    fpr, tpr, thresholds = roc_curve(val_labels, val_output)
+    fpr, tpr, thresholds = roc_curve(val_labels, val_outputs)
     theta = thresholds[(tpr-fpr).argmax()]
     print(f'Threshold: {theta:.4f}\n')
 
