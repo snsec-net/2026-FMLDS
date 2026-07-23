@@ -26,6 +26,10 @@ def score_llr(domains, M_D, M_B):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--variant", type=str, required=True, choices=["raw", "llr", "random"])
+    parser.add_argument("--upper-percentile", type=float, default=llr_mod.DEFAULT_UPPER_PERCENTILE,
+                         help="Benign score percentile used to calibrate tau (default: 95)")
+    parser.add_argument("--lower-percentile", type=float, default=llr_mod.DEFAULT_LOWER_PERCENTILE,
+                         help="DGA score percentile used to calibrate tau (default: 5)")
     parser.add_argument("--batch-size", type=int, default=1024)
     args = parser.parse_args()
 
@@ -39,9 +43,15 @@ def main() -> None:
     for p in model.parameters():
         p.requires_grad = False
 
-    benign_full = pd.read_parquet(path_train_data.joinpath("T24_benign_30days_with_llr.parquet"))
+    benign_path = llr_mod.benign_llr_path()
+    threshold_path = llr_mod.llr_output_paths(args.upper_percentile, args.lower_percentile)
+    if not (benign_path.exists() and threshold_path.exists()):
+        print(f"[{args.variant}] LLR files for p{args.upper_percentile:g}/p{args.lower_percentile:g} not found, computing...")
+        llr_mod.compute_llr(args.upper_percentile, args.lower_percentile)
+
+    benign_full = pd.read_parquet(benign_path)
     dga_val_df = pd.read_parquet(path_train_data.joinpath("T24_dga_30days_val.parquet"), columns=target_cols)
-    tau = float(path_train_data.joinpath("llr_threshold.txt").read_text().strip())
+    tau = float(threshold_path.read_text().strip())
 
     if args.variant == "raw":
         benign_for_val = benign_full

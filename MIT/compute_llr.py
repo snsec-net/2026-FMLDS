@@ -1,6 +1,7 @@
 """Compute character-bigram LLR for T24 benign domains.
 Reference benign = top 10% by avg_rank (real ground truth).
 """
+import argparse
 import string
 import time
 from pathlib import Path
@@ -18,6 +19,23 @@ A2I = {c: i for i, c in enumerate(ALPHA)}
 N = len(ALPHA)
 REF_BENIGN_FRAC = 0.10
 DGA_REF_SIZE = 200_000
+DEFAULT_UPPER_PERCENTILE = 95.0
+DEFAULT_LOWER_PERCENTILE = 5.0
+
+
+def _fmt_pct(pct: float) -> str:
+    return f"{pct:g}".replace(".", "p")
+
+
+def benign_llr_path():
+    """Path to the scored benign set. Fixed name: the per-domain LLR score doesn't depend on the calibration percentiles."""
+    return path_train_data.joinpath("T24_benign_30days_with_llr.parquet")
+
+
+def llr_output_paths(upper_percentile: float = DEFAULT_UPPER_PERCENTILE, lower_percentile: float = DEFAULT_LOWER_PERCENTILE):
+    tag = f"u{_fmt_pct(upper_percentile)}_l{_fmt_pct(lower_percentile)}"
+    threshold_path = path_train_data.joinpath(f"llr_threshold_{tag}.txt")
+    return threshold_path
 
 
 def sld(d: str) -> str:
@@ -52,7 +70,12 @@ def score(domain: str, M_D: np.ndarray, M_B: np.ndarray) -> float:
     return s / max(n, 1)
 
 
-def main() -> None:
+def compute_llr(upper_percentile: float = DEFAULT_UPPER_PERCENTILE, lower_percentile: float = DEFAULT_LOWER_PERCENTILE) -> tuple[pd.DataFrame, float]:
+    """Compute per-domain LLR for the full benign set and the calibration threshold tau.
+
+    tau = midpoint of (benign upper_percentile, DGA lower_percentile) of the calibration scores.
+    Saves the scored benign set and tau to files tagged with the given percentiles.
+    """
     t0 = time.time()
     benign_path = path_train_data.joinpath("T24_benign_30days.parquet")
     dga_path = path_train_data.joinpath("T24_dga_30days_train.parquet")
@@ -75,8 +98,10 @@ def main() -> None:
 
     eval_b = pd.Series(ref_benign).sample(min(5000, len(ref_benign)), random_state=1).map(lambda d: score(d, M_D, M_B))
     eval_d = pd.Series(dga_ref).sample(min(5000, len(dga_ref)), random_state=1).map(lambda d: score(d, M_D, M_B))
-    tau = float((eval_b.quantile(0.95) + eval_d.quantile(0.05)) / 2)
-    print(f"Calibration: benign p95={eval_b.quantile(0.95):+.3f}, DGA p5={eval_d.quantile(0.05):+.3f}, tau={tau:+.3f}")
+    q_upper, q_lower = upper_percentile / 100, lower_percentile / 100
+    tau = float((eval_b.quantile(q_upper) + eval_d.quantile(q_lower)) / 2)
+    print(f"Calibration: benign p{upper_percentile:g}={eval_b.quantile(q_upper):+.3f}, "
+          f"DGA p{lower_percentile:g}={eval_d.quantile(q_lower):+.3f}, tau={tau:+.3f}")
 
     print("Scoring full benign set...")
     benign["llr"] = benign["domain"].map(lambda d: score(d, M_D, M_B))
@@ -84,14 +109,26 @@ def main() -> None:
     print(f"Contamination rate (LLR > tau): {cont_rate:.4%}")
     print(f"LLR distribution: median={benign['llr'].median():+.3f}, p95={benign['llr'].quantile(0.95):+.3f}")
 
-    # out_path = path_train_data.joinpath("T24_benign_30days_with_llr.parquet")
-    # benign.to_parquet(out_path, index=False)
-    # print(f"Saved {len(benign):,} rows with LLR to {out_path}")
+    out_path = benign_llr_path()
+    benign.to_parquet(out_path, index=False)
+    print(f"Saved {len(benign):,} rows with LLR to {out_path}")
 
-    # thr_path = path_train_data.joinpath("llr_threshold.txt")
-    # thr_path.write_text(f"{tau}\n")
-    # print(f"Saved threshold to {thr_path}")
-    # print(f"Done in {time.time()-t0:.1f}s")
+    threshold_path = llr_output_paths(upper_percentile, lower_percentile)
+    threshold_path.write_text(f"{tau}\n")
+    print(f"Saved threshold to {threshold_path}")
+    print(f"Done in {time.time()-t0:.1f}s")
+
+    return benign, tau
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--upper-percentile", type=float, default=DEFAULT_UPPER_PERCENTILE,
+                         help="Benign score percentile used to calibrate tau (default: 95)")
+    parser.add_argument("--lower-percentile", type=float, default=DEFAULT_LOWER_PERCENTILE,
+                         help="DGA score percentile used to calibrate tau (default: 5)")
+    args = parser.parse_args()
+    compute_llr(args.upper_percentile, args.lower_percentile)
 
 
 if __name__ == "__main__":

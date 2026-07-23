@@ -14,6 +14,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 
 sys.path.append(str(Path(__file__).parent.parent))
+from compute_llr import compute_llr, benign_llr_path, llr_output_paths, DEFAULT_UPPER_PERCENTILE, DEFAULT_LOWER_PERCENTILE
 from dataloader import DGA_Dataset
 from MIT_model import MIT
 from utility.path import path_artifacts, path_train_data
@@ -22,7 +23,10 @@ from utility.path import path_artifacts, path_train_data
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--variant", type=str, required=True, choices=["raw", "llr", "random"])
-    parser.add_argument("--llr-threshold", type=float, default=None)
+    parser.add_argument("--upper-percentile", type=float, default=DEFAULT_UPPER_PERCENTILE,
+                         help="Benign score percentile used to calibrate tau (default: 95)")
+    parser.add_argument("--lower-percentile", type=float, default=DEFAULT_LOWER_PERCENTILE,
+                         help="DGA score percentile used to calibrate tau (default: 5)")
     parser.add_argument("--random-seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=100)
@@ -35,13 +39,16 @@ def main() -> None:
 
     dga_train_df = pd.read_parquet(path_train_data.joinpath("T24_dga_30days_train.parquet"), columns=target_cols)
     dga_val_df = pd.read_parquet(path_train_data.joinpath("T24_dga_30days_val.parquet"), columns=target_cols)
-    benign_df = pd.read_parquet(path_train_data.joinpath("T24_benign_30days_with_llr.parquet"))
-    n_total = len(benign_df)
 
-    if args.llr_threshold is None:
-        tau = float(path_train_data.joinpath("llr_threshold.txt").read_text().strip())
-    else:
-        tau = args.llr_threshold
+    benign_path = benign_llr_path()
+    threshold_path = llr_output_paths(args.upper_percentile, args.lower_percentile)
+    if not (benign_path.exists() and threshold_path.exists()):
+        print(f"[{args.variant}] LLR files for p{args.upper_percentile:g}/p{args.lower_percentile:g} not found, computing...")
+        compute_llr(args.upper_percentile, args.lower_percentile)
+
+    benign_df = pd.read_parquet(benign_path)
+    n_total = len(benign_df)
+    tau = float(threshold_path.read_text().strip())
     print(f"[{args.variant}] LLR threshold tau = {tau:+.4f}")
 
     if args.variant == "raw":
@@ -73,7 +80,7 @@ def main() -> None:
 
     best_val_loss = float("inf")
     best_epoch = 0
-    model_path = path_artifacts.joinpath(f"MIT_T24_{args.variant}_30days.pt")
+    model_path = path_artifacts.joinpath(f"MIT_T24_{args.variant}_30days_u{args.upper_percentile}_l{args.lower_percentile}.pt")
 
     for epoch in range(args.epochs):
         t0 = time.time()
