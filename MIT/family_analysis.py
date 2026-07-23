@@ -1,5 +1,6 @@
 """Family-level FNR breakdown for MIT models (raw, llr, random) using DGArchive family meta.
 Also computes threshold sensitivity sweep on the LLR-cleaned test view."""
+import argparse
 import sys
 from pathlib import Path
 
@@ -17,7 +18,7 @@ import compute_llr as llr_mod
 
 
 def threshold_for_variant(model, device, variant, tau):
-    benign_full = pd.read_parquet(path_train_data.joinpath("T24_benign_30days_with_llr.parquet"))
+    benign_full = pd.read_parquet(llr_mod.benign_llr_path())
     dga_val_df = pd.read_parquet(path_train_data.joinpath("T24_dga_30days_val.parquet"), columns=["domain", "label"])
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import roc_curve
@@ -50,8 +51,21 @@ def threshold_for_variant(model, device, variant, tau):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--upper-percentile", type=float, default=llr_mod.DEFAULT_UPPER_PERCENTILE,
+                         help="Benign score percentile used to calibrate tau (default: 95)")
+    parser.add_argument("--lower-percentile", type=float, default=llr_mod.DEFAULT_LOWER_PERCENTILE,
+                         help="DGA score percentile used to calibrate tau (default: 5)")
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tau = float(path_train_data.joinpath("llr_threshold.txt").read_text().strip())
+
+    benign_path = llr_mod.benign_llr_path()
+    threshold_path = llr_mod.llr_output_paths(args.upper_percentile, args.lower_percentile)
+    if not (benign_path.exists() and threshold_path.exists()):
+        print(f"LLR files for p{args.upper_percentile:g}/p{args.lower_percentile:g} not found, computing...")
+        llr_mod.compute_llr(args.upper_percentile, args.lower_percentile)
+    tau = float(threshold_path.read_text().strip())
 
     # Load DGArchive test with family meta
     dga_test = pd.read_parquet(path_test_data.joinpath("T25-26_dga_byYear.parquet"))
@@ -76,7 +90,7 @@ def main():
     family_rows = []
     threshold_rows = []
     for variant in ["raw", "llr", "random"]:
-        ckpt = path_artifacts.joinpath(f"MIT_T24_{variant}_30days.pt")
+        ckpt = path_artifacts.joinpath(f"MIT_T24_{variant}_30days_u{args.upper_percentile}_l{args.lower_percentile}.pt")
         if not ckpt.exists():
             print(f"WARN: missing {ckpt}; skipping")
             continue
@@ -142,10 +156,13 @@ def main():
             fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
             threshold_rows.append({"model":"MIT","variant": variant, "test_view": label_str, "n_benign_kept": int(mask.sum()), "fpr": fpr, "fnr": fnr})
 
+    tag = f"u{args.upper_percentile}_l{args.lower_percentile}"
+
     if family_rows:
         fam_df = pd.concat(family_rows, ignore_index=True)
-        fam_df.to_csv(path_results.joinpath("family_FNR_MIT_byYear.csv"), index=False)
-        print(f"\nSaved per-family FNR to {path_results.joinpath('family_FNR_MIT_byYear.csv')}")
+        fam_out_path = path_results.joinpath(f"family_FNR_MIT_byYear_{tag}.csv")
+        fam_df.to_csv(fam_out_path, index=False)
+        print(f"\nSaved per-family FNR to {fam_out_path}")
 
         # Highlight word-based DGAs (if present)
         word_families = ["suppobox", "pushdo", "gazavat", "matsnu", "rovnix"]
@@ -160,13 +177,13 @@ def main():
         if all(v in pivot.columns for v in ["raw", "llr", "random"]):
             pivot["llr_minus_raw"] = pivot["llr"] - pivot["raw"]
             pivot = pivot.sort_values("n", ascending=False).head(25)
-            pivot.to_csv(path_results.joinpath("family_FNR_pivot_top25_byYear.csv"), index=False)
+            pivot.to_csv(path_results.joinpath(f"family_FNR_pivot_top25_byYear_{tag}.csv"), index=False)
             print("\n--- Top 25 families by sample size (FNR per variant) ---")
             print(pivot.to_string(index=False))
 
     if threshold_rows:
         thr_df = pd.DataFrame(threshold_rows)
-        thr_df.to_csv(path_results.joinpath("threshold_sweep_MIT_byYear.csv"), index=False)
+        thr_df.to_csv(path_results.joinpath(f"threshold_sweep_MIT_byYear_{tag}.csv"), index=False)
         print(f"\n--- Threshold sweep ---")
         print(thr_df.to_string(index=False))
 
